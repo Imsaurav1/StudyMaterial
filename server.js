@@ -1,6 +1,11 @@
+/*********************************
+ * IMPORTS
+ *********************************/
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 require("dotenv").config();
 
 const app = express();
@@ -13,16 +18,13 @@ const allowedOrigins = [
   "https://saurabhjha.co.in",
   "https://www.saurabhjha.live",
   "https://saurabhjha.live",
-   "http://localhost:3000",
-   "http://127.0.0.1:5501"
-
+  "http://localhost:3000",
+  "http://127.0.0.1:5501"
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    // allow requests with no origin (Postman, server-side)
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -34,9 +36,7 @@ app.use(cors({
   credentials: true
 }));
 
-// Preflight support (IMPORTANT)
 app.options("*", cors());
-
 app.use(express.json());
 
 /* ================================
@@ -68,10 +68,60 @@ const PracticeMaterial = mongoose.model(
 );
 
 /* ================================
+   ADMIN LOGIN (JWT)
+================================ */
+app.post("/api/admin/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  if (email !== process.env.ADMIN_EMAIL) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  // hash env password once and compare
+  const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+  const isValid = await bcrypt.compare(password, hashedPassword);
+
+  if (!isValid) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  const token = jwt.sign(
+    { role: "admin", email },
+    process.env.JWT_SECRET,
+    { expiresIn: "2h" }
+  );
+
+  res.json({ token });
+});
+
+/* ================================
+   ADMIN AUTH MIDDLEWARE
+================================ */
+function adminAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
+}
+
+/* ================================
    ROUTES
 ================================ */
 
-// Get all materials
+// 🔓 PUBLIC – Get all materials
 app.get("/api/materials", async (req, res) => {
   try {
     const data = await PracticeMaterial.find().sort({ createdAt: -1 });
@@ -81,8 +131,8 @@ app.get("/api/materials", async (req, res) => {
   }
 });
 
-// Create material
-app.post("/api/materials", async (req, res) => {
+// 🔐 ADMIN – Create material
+app.post("/api/materials", adminAuth, async (req, res) => {
   try {
     const material = new PracticeMaterial(req.body);
     await material.save();
@@ -92,8 +142,8 @@ app.post("/api/materials", async (req, res) => {
   }
 });
 
-// Update material
-app.put("/api/materials/:id", async (req, res) => {
+// 🔐 ADMIN – Update material
+app.put("/api/materials/:id", adminAuth, async (req, res) => {
   try {
     const updated = await PracticeMaterial.findByIdAndUpdate(
       req.params.id,
@@ -106,8 +156,8 @@ app.put("/api/materials/:id", async (req, res) => {
   }
 });
 
-// Delete material
-app.delete("/api/materials/:id", async (req, res) => {
+// 🔐 ADMIN – Delete material
+app.delete("/api/materials/:id", adminAuth, async (req, res) => {
   try {
     await PracticeMaterial.findByIdAndDelete(req.params.id);
     res.json({ message: "Deleted Successfully" });
