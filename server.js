@@ -12,7 +12,8 @@ const allowedOrigins = [
   "https://www.saurabhjha.co.in",
   "https://saurabhjha.co.in",
   "https://www.saurabhjha.live",
-  "https://saurabhjha.live"
+  "https://saurabhjha.live",
+   "http://127.0.0.1:5500"
 ];
 
 app.use(cors({
