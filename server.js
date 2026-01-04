@@ -16,7 +16,8 @@ const PracticeMaterialSchema = new mongoose.Schema({
   category: { type: String, default: "Practice Material" },
   type: { type: String, default: "PDF Download" },
   description: String,
-  pdfUrl: String
+  pdfUrl: String,
+  imageUrl: String
 }, { timestamps: true });
 
 const PracticeMaterial = mongoose.model("PracticeMaterial", PracticeMaterialSchema);
