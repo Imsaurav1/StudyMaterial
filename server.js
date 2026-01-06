@@ -66,6 +66,29 @@ const PracticeMaterial = mongoose.model(
 );
 
 /* ================================
+   POST SCHEMA & MODEL
+================================ */
+const PostSchema = new mongoose.Schema(
+  {
+    title: { type: String, required: true },
+    slug: { type: String, unique: true, required: true },
+    content: { type: String, required: true }, // FULL HTML
+    excerpt: String,
+    featuredImage: String,
+    status: {
+      type: String,
+      enum: ["draft", "published"],
+      default: "published"
+    },
+    author: { type: String, default: "Saurabh Kumar Jha" }
+  },
+  { timestamps: true }
+);
+
+const Post = mongoose.model("Post", PostSchema);
+
+
+/* ================================
    ADMIN LOGIN (JWT)
 ================================ */
 app.post("/api/admin/login", async (req, res) => {
@@ -129,6 +152,41 @@ app.get("/api/materials", async (req, res) => {
   }
 });
 
+
+/* ================================
+   PUBLIC – POSTS
+================================ */
+
+// Get all published posts
+app.get("/api/posts", async (req, res) => {
+  try {
+    const posts = await Post.find({ status: "published" })
+      .sort({ createdAt: -1 });
+    res.json(posts);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get single post by slug
+app.get("/api/posts/:slug", async (req, res) => {
+  try {
+    const post = await Post.findOne({
+      slug: req.params.slug,
+      status: "published"
+    });
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    res.json(post);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 // 🔐 ADMIN – Create material
 app.post("/api/materials", adminAuth, async (req, res) => {
   try {
@@ -163,6 +221,50 @@ app.delete("/api/materials/:id", adminAuth, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+
+/* ================================
+   ADMIN – POSTS (JWT PROTECTED)
+================================ */
+
+// Create new post
+app.post("/api/posts", adminAuth, async (req, res) => {
+  try {
+    const post = new Post(req.body);
+    await post.save();
+    res.status(201).json(post);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Update post
+app.put("/api/posts/:id", adminAuth, async (req, res) => {
+  try {
+    const updated = await Post.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true }
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Delete post
+app.delete("/api/posts/:id", adminAuth, async (req, res) => {
+  try {
+    await Post.findByIdAndDelete(req.params.id);
+    res.json({ message: "Post deleted successfully" });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+
+
+
 
 /* ================================
    SERVER START
