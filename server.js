@@ -230,13 +230,40 @@ app.delete("/api/materials/:id", adminAuth, async (req, res) => {
 // Create new post
 app.post("/api/posts", adminAuth, async (req, res) => {
   try {
-    const post = new Post(req.body);
+    const { title, content, excerpt, status } = req.body;
+
+    // 🔐 Validation
+    if (!title || !content) {
+      return res.status(400).json({
+        message: "Title and content are required"
+      });
+    }
+
+    // 🔑 Auto-generate slug
+    const slug = slugify(title, {
+      lower: true,
+      strict: true
+    });
+
+    const post = new Post({
+      title,
+      slug,
+      content,
+      excerpt,
+      status
+    });
+
     await post.save();
     res.status(201).json(post);
+
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error("Post create error:", err.message);
+    res.status(400).json({
+      message: err.message
+    });
   }
 });
+;
 
 // Update post
 app.put("/api/posts/:id", adminAuth, async (req, res) => {
