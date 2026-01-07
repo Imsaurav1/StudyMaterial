@@ -204,6 +204,26 @@ app.get("/api/posts/:slug", async (req, res) => {
 });
 
 
+app.post("/api/posts/:slug/view", async (req, res) => {
+  try {
+    const post = await Post.findOneAndUpdate(
+      { slug: req.params.slug },
+      { $inc: { views: 1 } },
+      { new: true }
+    );
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    res.json({ success: true, views: post.views });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update views" });
+  }
+});
+
+
+
 // 🔐 ADMIN – Create material
 app.post("/api/materials", adminAuth, async (req, res) => {
   try {
