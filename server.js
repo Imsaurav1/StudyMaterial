@@ -71,7 +71,6 @@ const PracticeMaterial = mongoose.model(
 /* ================================
    POST SCHEMA & MODEL
 ================================ */
-const mongoose = require("mongoose");
 
 const PostSchema = new mongoose.Schema(
   {
