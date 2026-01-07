@@ -175,15 +175,18 @@ app.get("/api/materials", async (req, res) => {
 ================================ */
 
 // Get all published posts
-app.get("/api/posts", async (req, res) => {
+app.post("/api/posts/:slug/view", async (req, res) => {
   try {
-    const posts = await Post.find({ status: "published" })
-      .sort({ createdAt: -1 });
-    res.json(posts);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
+    await Post.findOneAndUpdate(
+      { slug: req.params.slug },
+      { $inc: { views: 1 } }
+    );
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: "Failed to update views" });
   }
 });
+
 
 // Get single post by slug
 app.get("/api/posts/:slug", async (req, res) => {
@@ -203,24 +206,6 @@ app.get("/api/posts/:slug", async (req, res) => {
   }
 });
 
-
-app.post("/api/posts/:slug/view", async (req, res) => {
-  try {
-    const post = await Post.findOneAndUpdate(
-      { slug: req.params.slug },
-      { $inc: { views: 1 } },
-      { new: true }
-    );
-
-    if (!post) {
-      return res.status(404).json({ message: "Post not found" });
-    }
-
-    res.json({ success: true, views: post.views });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update views" });
-  }
-});
 
 
 
