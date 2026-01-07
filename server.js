@@ -71,23 +71,38 @@ const PracticeMaterial = mongoose.model(
 /* ================================
    POST SCHEMA & MODEL
 ================================ */
+const mongoose = require("mongoose");
+
 const PostSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
     slug: { type: String, unique: true, required: true },
     content: { type: String, required: true }, // FULL HTML
-    excerpt: String,
-    featuredImage: String,
+    excerpt: { type: String },
+    featuredImage: { type: String },
     status: {
       type: String,
       enum: ["draft", "published"],
       default: "published"
     },
-    author: { type: String, default: "Saurabh Kumar Jha" }
+    author: {
+      type: String,
+      default: "Saurabh Kumar Jha"
+    },
+    // ✅ NEW: Views count
+    views: {
+      type: Number,
+      default: 0
+    },
+    // ✅ NEW: Tags array
+    tags: {
+      type: [String],
+      default: []
+      // example: ["Infosys", "Coding", "Interview", "DSA"]
+    }
   },
   { timestamps: true }
 );
-
 const Post = mongoose.model("Post", PostSchema);
 
 
@@ -230,10 +245,15 @@ app.delete("/api/materials/:id", adminAuth, async (req, res) => {
    ADMIN – POSTS (JWT PROTECTED)
 ================================ */
 
-// Create new post
 app.post("/api/posts", adminAuth, async (req, res) => {
   try {
-    const { title, content, excerpt, status } = req.body;
+    const {
+      title,
+      content,
+      excerpt,
+      status,
+      tags // 👈 NEW
+    } = req.body;
 
     if (!title || !content) {
       return res.status(400).json({
@@ -259,10 +279,15 @@ app.post("/api/posts", adminAuth, async (req, res) => {
       slug,
       content,
       excerpt,
-      status
+      status,
+      tags: Array.isArray(tags) ? tags : [], // ✅ safe handling
+      views: 0 // ✅ explicit (optional, default already works)
     });
 
-    res.status(201).json(post);
+    res.status(201).json({
+      message: "Post created successfully",
+      post
+    });
 
   } catch (err) {
     console.error("Post create error:", err);
@@ -271,6 +296,7 @@ app.post("/api/posts", adminAuth, async (req, res) => {
     });
   }
 });
+
 
 
 // Update post
