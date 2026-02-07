@@ -19,8 +19,7 @@ const allowedOrigins = [
   "https://www.saurabhjha.co.in",
   "https://saurabhjha.co.in",
   "https://www.saurabhjha.live",
-  "https://saurabhjha.live",
-   "https://saurabh1jha-git-main-imsaurav1s-projects.vercel.app"
+  "https://saurabhjha.live"
 ];
 
 app.use(cors({
