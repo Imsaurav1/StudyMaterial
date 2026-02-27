@@ -75,7 +75,8 @@ const PracticeMaterialSchema = new mongoose.Schema({
   type:        { type: String, default: "PDF Download", trim: true },
   description: { type: String, trim: true },
   pdfUrl:      { type: String, trim: true },
-  imageUrl:    { type: String, trim: true }
+  imageUrl:    { type: String, trim: true },
+  downloads:   { type: Number, default: 0, min: 0 } // ✅ NEW: download counter
 }, { timestamps: true });
 
 const PracticeMaterial = mongoose.model("PracticeMaterial", PracticeMaterialSchema);
@@ -234,6 +235,30 @@ app.post("/api/admin/login", asyncHandler(async (req, res) => {
 app.get("/api/materials", asyncHandler(async (req, res) => {
   const data = await PracticeMaterial.find().sort({ createdAt: -1 }).lean();
   res.json(data);
+}));
+
+/* ================================
+   ROUTE – INCREMENT DOWNLOAD COUNT
+   Every time a user clicks "Download PDF", the frontend
+   calls this route. No deduplication — every click counts
+   as one download (mirrors how most download trackers work).
+================================ */
+app.post("/api/materials/:id/download", asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ message: "Invalid material ID" });
+  }
+
+  const material = await PracticeMaterial.findByIdAndUpdate(
+    req.params.id,
+    { $inc: { downloads: 1 } },
+    { new: true, select: "downloads" }
+  );
+
+  if (!material) {
+    return res.status(404).json({ message: "Material not found" });
+  }
+
+  res.json({ success: true, downloads: material.downloads });
 }));
 
 /* ================================
