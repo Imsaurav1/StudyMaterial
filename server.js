@@ -107,6 +107,23 @@ PostSchema.index({ status: 1, createdAt: -1 });
 const Post = mongoose.model("Post", PostSchema);
 
 /* ================================
+   VIEW LOG SCHEMA
+   Tracks which IPs have viewed which slugs.
+   TTL index auto-deletes entries after 24h so
+   the same IP can increment the counter again the next day.
+================================ */
+const ViewLogSchema = new mongoose.Schema({
+  slug: { type: String, required: true },
+  ip:   { type: String, required: true },
+  viewedAt: { type: Date, default: Date.now, expires: 86400 } // 86400s = 24 hours
+});
+
+// Compound unique index: one record per IP+slug combo within the 24h window
+ViewLogSchema.index({ slug: 1, ip: 1 }, { unique: true });
+
+const ViewLog = mongoose.model("ViewLog", ViewLogSchema);
+
+/* ================================
    PRE-HASH ADMIN PASSWORD AT STARTUP
    Fix: original code re-hashed on every login request,
    making bcrypt.compare always return false (new hash != stored)
@@ -138,6 +155,19 @@ const asyncHandler = (fn) => (req, res, next) =>
  * Validate MongoDB ObjectId to avoid CastError on malformed IDs.
  */
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+/**
+ * Extract the real client IP from the request.
+ * Works correctly behind Render, Vercel, Cloudflare, and other proxies.
+ */
+function getClientIP(req) {
+  return (
+    req.headers["x-forwarded-for"]?.split(",")[0].trim() ||
+    req.headers["x-real-ip"] ||
+    req.socket.remoteAddress ||
+    "unknown"
+  );
+}
 
 /* ================================
    ADMIN AUTH MIDDLEWARE
@@ -300,19 +330,56 @@ app.get("/api/posts/:slug", asyncHandler(async (req, res) => {
   res.json(post);
 }));
 
-// Increment post view count
+/* ================================
+   ROUTE – INCREMENT VIEW COUNT
+   Uses server-side IP + slug deduplication via ViewLog.
+   - Same IP cannot increment the same post more than once per 24 hours.
+   - TTL index on ViewLog auto-expires records after 24h.
+   - Works correctly behind Render/Vercel proxies via x-forwarded-for.
+   - `counted: true`  → new view, counter was incremented
+   - `counted: false` → duplicate within 24h, counter unchanged
+================================ */
 app.post("/api/posts/:slug/view", asyncHandler(async (req, res) => {
-  const post = await Post.findOneAndUpdate(
-    { slug: req.params.slug },
-    { $inc: { views: 1 } },
-    { new: true, select: "views" }
-  );
+  const slug = req.params.slug;
+  const ip   = getClientIP(req);
 
-  if (!post) {
-    return res.status(404).json({ message: "Post not found" });
+  try {
+    // Try to insert a new ViewLog record for this IP+slug combo.
+    // If it already exists (duplicate key), Mongoose throws error code 11000.
+    await ViewLog.create({ slug, ip });
+
+    // Only reaches here on a genuinely new view — now increment the counter.
+    const post = await Post.findOneAndUpdate(
+      { slug, status: "published" },
+      { $inc: { views: 1 } },
+      { new: true, select: "views" }
+    );
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    return res.json({ success: true, views: post.views, counted: true });
+
+  } catch (err) {
+    if (err.code === 11000) {
+      // Duplicate key — this IP already viewed this slug within 24h.
+      // Return current view count without incrementing.
+      const post = await Post.findOne(
+        { slug, status: "published" },
+        { views: 1 }
+      ).lean();
+
+      return res.json({
+        success: true,
+        views:   post?.views ?? 0,
+        counted: false  // tells the frontend it was a duplicate
+      });
+    }
+
+    // Any other error — re-throw so the global handler catches it
+    throw err;
   }
-
-  res.json({ success: true, views: post.views });
 }));
 
 /* ================================
@@ -373,7 +440,7 @@ app.put("/api/posts/:id", adminAuth, asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid post ID" });
   }
 
-  // Prevent overwriting slug accidentally unless explicitly passed
+  // Prevent overwriting slug or views accidentally
   const { slug: _ignoredSlug, views: _ignoredViews, ...safeBody } = req.body;
 
   const updated = await Post.findByIdAndUpdate(
@@ -400,6 +467,9 @@ app.delete("/api/posts/:id", adminAuth, asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Post not found" });
   }
 
+  // Clean up all ViewLog records for this post's slug too
+  await ViewLog.deleteMany({ slug: deleted.slug });
+
   res.json({ message: "Post deleted successfully" });
 }));
 
@@ -422,7 +492,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
     return res.status(400).json({ message: "Validation error", errors: messages });
   }
 
-  // Mongoose duplicate key error
+  // Mongoose duplicate key error (outside of the view route)
   if (err.code === 11000) {
     const field = Object.keys(err.keyPattern || {})[0] || "field";
     return res.status(409).json({ message: `Duplicate value for: ${field}` });
