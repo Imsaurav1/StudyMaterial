@@ -6,11 +6,22 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-require("dotenv").config();
 const slugify = require("slugify");
-
+require("dotenv").config();
 
 const app = express();
+
+/* ================================
+   ENVIRONMENT VALIDATION
+   Fail fast if required env vars are missing
+================================ */
+const REQUIRED_ENV = ["MONGODB_URI", "JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD"];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing required environment variable: ${key}`);
+    process.exit(1);
+  }
+}
 
 /* ================================
    CORS CONFIGURATION
@@ -23,13 +34,11 @@ const allowedOrigins = [
 ];
 
 app.use(cors({
-  origin: function (origin, callback) {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g. mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("CORS not allowed for this origin"));
-    }
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -37,88 +46,146 @@ app.use(cors({
 }));
 
 app.options("*", cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" })); // Prevent oversized payloads
 
 /* ================================
    MONGODB CONNECTION
 ================================ */
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log("✅ MongoDB Connected"))
-.catch(err => console.error("❌ MongoDB Error:", err));
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => {
+    console.error("❌ MongoDB Connection Failed:", err.message);
+    process.exit(1);
+  });
+
+mongoose.connection.on("disconnected", () =>
+  console.warn("⚠️ MongoDB disconnected")
+);
+mongoose.connection.on("reconnected", () =>
+  console.log("✅ MongoDB reconnected")
+);
 
 /* ================================
-   SCHEMA & MODEL
+   SCHEMAS & MODELS
 ================================ */
 const PracticeMaterialSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  date: String,
-  category: { type: String, default: "Practice Material" },
-  type: { type: String, default: "PDF Download" },
-  description: String,
-  pdfUrl: String,
-  imageUrl: String
+  title:       { type: String, required: true, trim: true },
+  date:        { type: String, trim: true },
+  category:    { type: String, default: "Practice Material", trim: true },
+  type:        { type: String, default: "PDF Download", trim: true },
+  description: { type: String, trim: true },
+  pdfUrl:      { type: String, trim: true },
+  imageUrl:    { type: String, trim: true }
 }, { timestamps: true });
 
-const PracticeMaterial = mongoose.model(
-  "PracticeMaterial",
-  PracticeMaterialSchema
-);
+const PracticeMaterial = mongoose.model("PracticeMaterial", PracticeMaterialSchema);
 
-/* ================================
-   POST SCHEMA & MODEL
-================================ */
-
-const PostSchema = new mongoose.Schema(
-  {
-    title: { type: String, required: true },
-    slug: { type: String, unique: true, required: true },
-    content: { type: String, required: true }, // FULL HTML
-    excerpt: { type: String },
-    featuredImage: { type: String },
-    status: {
-      type: String,
-      enum: ["draft", "published"],
-      default: "published"
-    },
-    author: {
-      type: String,
-      default: "Saurabh Kumar Jha"
-    },
-    // ✅ NEW: Views count
-    views: {
-      type: Number,
-      default: 0
-    },
-    // ✅ NEW: Tags array
-    tags: {
-      type: [String],
-      default: []
-      // example: ["Infosys", "Coding", "Interview", "DSA"]
-    }
+const PostSchema = new mongoose.Schema({
+  title:         { type: String, required: true, trim: true },
+  slug:          { type: String, unique: true, required: true, trim: true },
+  content:       { type: String, required: true },
+  excerpt:       { type: String, trim: true },
+  featuredImage: { type: String, trim: true },
+  status: {
+    type:    String,
+    enum:    ["draft", "published"],
+    default: "published"
   },
-  { timestamps: true }
-);
+  author: {
+    type:    String,
+    default: "Saurabh Kumar Jha",
+    trim:    true
+  },
+  views: { type: Number, default: 0, min: 0 },
+  tags:  { type: [String], default: [] }
+}, { timestamps: true });
+
+// Index for faster slug lookups
+PostSchema.index({ slug: 1 });
+PostSchema.index({ status: 1, createdAt: -1 });
+
 const Post = mongoose.model("Post", PostSchema);
 
+/* ================================
+   PRE-HASH ADMIN PASSWORD AT STARTUP
+   Fix: original code re-hashed on every login request,
+   making bcrypt.compare always return false (new hash != stored)
+================================ */
+let hashedAdminPassword = null;
+
+(async () => {
+  try {
+    hashedAdminPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
+    console.log("✅ Admin password hashed");
+  } catch (err) {
+    console.error("❌ Failed to hash admin password:", err.message);
+    process.exit(1);
+  }
+})();
 
 /* ================================
-   ADMIN LOGIN (JWT)
+   UTILITY HELPERS
 ================================ */
-app.post("/api/admin/login", async (req, res) => {
-  const { email, password } = req.body;
 
-  if (email !== process.env.ADMIN_EMAIL) {
-    return res.status(401).json({ message: "Invalid credentials" });
+/**
+ * Wraps an async route handler and forwards errors to Express error middleware.
+ * Eliminates repetitive try/catch in every route.
+ */
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
+
+/**
+ * Validate MongoDB ObjectId to avoid CastError on malformed IDs.
+ */
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+/* ================================
+   ADMIN AUTH MIDDLEWARE
+================================ */
+function adminAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Unauthorized: No token provided" });
   }
 
-  // hash env password once and compare
-  const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
-  const isValid = await bcrypt.compare(password, hashedPassword);
+  const token = authHeader.split(" ")[1];
 
-  if (!isValid) {
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden: Insufficient privileges" });
+    }
+    req.admin = decoded;
+    next();
+  } catch (err) {
+    const message = err.name === "TokenExpiredError"
+      ? "Token expired, please log in again"
+      : "Invalid token";
+    return res.status(401).json({ message });
+  }
+}
+
+/* ================================
+   ROUTES – ADMIN AUTH
+================================ */
+app.post("/api/admin/login", asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: "Email and password are required" });
+  }
+
+  // Constant-time email comparison to avoid timing attacks
+  const emailMatch = email === process.env.ADMIN_EMAIL;
+
+  // Always run bcrypt compare even on wrong email to prevent timing-based user enumeration
+  const isValid = await bcrypt.compare(
+    password,
+    hashedAdminPassword || "$2a$12$invalidhashtopreventtimingattack"
+  );
+
+  if (!emailMatch || !isValid) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
@@ -129,211 +196,264 @@ app.post("/api/admin/login", async (req, res) => {
   );
 
   res.json({ token });
+}));
+
+/* ================================
+   ROUTES – PRACTICE MATERIALS (PUBLIC)
+================================ */
+app.get("/api/materials", asyncHandler(async (req, res) => {
+  const data = await PracticeMaterial.find().sort({ createdAt: -1 }).lean();
+  res.json(data);
+}));
+
+/* ================================
+   ROUTES – PRACTICE MATERIALS (ADMIN)
+================================ */
+app.post("/api/materials", adminAuth, asyncHandler(async (req, res) => {
+  const { title, date, category, type, description, pdfUrl, imageUrl } = req.body;
+
+  if (!title) {
+    return res.status(400).json({ message: "Title is required" });
+  }
+
+  const material = await PracticeMaterial.create({
+    title, date, category, type, description, pdfUrl, imageUrl
+  });
+
+  res.status(201).json(material);
+}));
+
+app.put("/api/materials/:id", adminAuth, asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ message: "Invalid material ID" });
+  }
+
+  const updated = await PracticeMaterial.findByIdAndUpdate(
+    req.params.id,
+    req.body,
+    { new: true, runValidators: true }
+  );
+
+  if (!updated) {
+    return res.status(404).json({ message: "Material not found" });
+  }
+
+  res.json(updated);
+}));
+
+app.delete("/api/materials/:id", adminAuth, asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ message: "Invalid material ID" });
+  }
+
+  const deleted = await PracticeMaterial.findByIdAndDelete(req.params.id);
+
+  if (!deleted) {
+    return res.status(404).json({ message: "Material not found" });
+  }
+
+  res.json({ message: "Deleted successfully" });
+}));
+
+/* ================================
+   ROUTES – POSTS (PUBLIC)
+================================ */
+
+// Get all published posts (with pagination)
+app.get("/api/posts", asyncHandler(async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+  const skip  = (page - 1) * limit;
+
+  const [posts, total] = await Promise.all([
+    Post.find({ status: "published" })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select("-content") // Omit heavy content in list view
+      .lean(),
+    Post.countDocuments({ status: "published" })
+  ]);
+
+  res.json({
+    posts,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  });
+}));
+
+// Get single published post by slug
+app.get("/api/posts/:slug", asyncHandler(async (req, res) => {
+  const post = await Post.findOne({
+    slug:   req.params.slug,
+    status: "published"
+  }).lean();
+
+  if (!post) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+
+  res.json(post);
+}));
+
+// Increment post view count
+app.post("/api/posts/:slug/view", asyncHandler(async (req, res) => {
+  const post = await Post.findOneAndUpdate(
+    { slug: req.params.slug },
+    { $inc: { views: 1 } },
+    { new: true, select: "views" }
+  );
+
+  if (!post) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+
+  res.json({ success: true, views: post.views });
+}));
+
+/* ================================
+   ROUTES – POSTS (ADMIN)
+================================ */
+app.post("/api/posts", adminAuth, asyncHandler(async (req, res) => {
+  const { title, content, excerpt, featuredImage, status, tags } = req.body;
+
+  if (!title || !content) {
+    return res.status(400).json({ message: "Title and content are required" });
+  }
+
+  let slug = slugify(title, { lower: true, strict: true });
+
+  // Handle duplicate slugs by appending a counter suffix
+  let suffix = 0;
+  let uniqueSlug = slug;
+  while (await Post.exists({ slug: uniqueSlug })) {
+    suffix++;
+    uniqueSlug = `${slug}-${suffix}`;
+  }
+
+  const post = await Post.create({
+    title,
+    slug: uniqueSlug,
+    content,
+    excerpt,
+    featuredImage,
+    status: status || "published",
+    tags: Array.isArray(tags) ? tags.map(t => t.trim()).filter(Boolean) : [],
+    views: 0
+  });
+
+  res.status(201).json({ message: "Post created successfully", post });
+}));
+
+// Get all posts (admin — includes drafts)
+app.get("/api/admin/posts", adminAuth, asyncHandler(async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const skip  = (page - 1) * limit;
+
+  const [posts, total] = await Promise.all([
+    Post.find()
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select("-content")
+      .lean(),
+    Post.countDocuments()
+  ]);
+
+  res.json({ posts, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+}));
+
+app.put("/api/posts/:id", adminAuth, asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ message: "Invalid post ID" });
+  }
+
+  // Prevent overwriting slug accidentally unless explicitly passed
+  const { slug: _ignoredSlug, views: _ignoredViews, ...safeBody } = req.body;
+
+  const updated = await Post.findByIdAndUpdate(
+    req.params.id,
+    safeBody,
+    { new: true, runValidators: true }
+  );
+
+  if (!updated) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+
+  res.json(updated);
+}));
+
+app.delete("/api/posts/:id", adminAuth, asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ message: "Invalid post ID" });
+  }
+
+  const deleted = await Post.findByIdAndDelete(req.params.id);
+
+  if (!deleted) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+
+  res.json({ message: "Post deleted successfully" });
+}));
+
+/* ================================
+   404 HANDLER
+================================ */
+app.use((req, res) => {
+  res.status(404).json({ message: `Route not found: ${req.method} ${req.path}` });
 });
 
 /* ================================
-   ADMIN AUTH MIDDLEWARE
+   GLOBAL ERROR HANDLER
 ================================ */
-function adminAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  console.error(`❌ [${new Date().toISOString()}] ${req.method} ${req.path}:`, err);
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Unauthorized" });
+  // Mongoose validation error
+  if (err.name === "ValidationError") {
+    const messages = Object.values(err.errors).map(e => e.message);
+    return res.status(400).json({ message: "Validation error", errors: messages });
   }
 
-  const token = authHeader.split(" ")[1];
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== "admin") {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-    next();
-  } catch (err) {
-    return res.status(401).json({ message: "Invalid or expired token" });
+  // Mongoose duplicate key error
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyPattern || {})[0] || "field";
+    return res.status(409).json({ message: `Duplicate value for: ${field}` });
   }
-}
 
-/* ================================
-   ROUTES
-================================ */
-
-// 🔓 PUBLIC – Get all materials
-app.get("/api/materials", async (req, res) => {
-  try {
-    const data = await PracticeMaterial.find().sort({ createdAt: -1 });
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
+  // CORS error
+  if (err.message?.startsWith("CORS blocked")) {
+    return res.status(403).json({ message: err.message });
   }
+
+  res.status(500).json({
+    message: "Internal server error",
+    ...(process.env.NODE_ENV === "development" && { error: err.message })
+  });
 });
-
-
-/* ================================
-   PUBLIC – POSTS
-================================ */
-
-// Get all published posts
-app.post("/api/posts/:slug/view", async (req, res) => {
-  try {
-    await Post.findOneAndUpdate(
-      { slug: req.params.slug },
-      { $inc: { views: 1 } }
-    );
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: "Failed to update views" });
-  }
-});
-
-
-// Get single post by slug
-app.get("/api/posts/:slug", async (req, res) => {
-  try {
-    const post = await Post.findOne({
-      slug: req.params.slug,
-      status: "published"
-    });
-
-    if (!post) {
-      return res.status(404).json({ message: "Post not found" });
-    }
-
-    res.json(post);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-
-
-
-// 🔐 ADMIN – Create material
-app.post("/api/materials", adminAuth, async (req, res) => {
-  try {
-    const material = new PracticeMaterial(req.body);
-    await material.save();
-    res.status(201).json(material);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// 🔐 ADMIN – Update material
-app.put("/api/materials/:id", adminAuth, async (req, res) => {
-  try {
-    const updated = await PracticeMaterial.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true }
-    );
-    res.json(updated);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// 🔐 ADMIN – Delete material
-app.delete("/api/materials/:id", adminAuth, async (req, res) => {
-  try {
-    await PracticeMaterial.findByIdAndDelete(req.params.id);
-    res.json({ message: "Deleted Successfully" });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-
-/* ================================
-   ADMIN – POSTS (JWT PROTECTED)
-================================ */
-
-app.post("/api/posts", adminAuth, async (req, res) => {
-  try {
-    const {
-      title,
-      content,
-      excerpt,
-      status,
-      tags // 👈 NEW
-    } = req.body;
-
-    if (!title || !content) {
-      return res.status(400).json({
-        message: "Title and content are required"
-      });
-    }
-
-    const slug = slugify(title, {
-      lower: true,
-      strict: true
-    });
-
-    // 🔒 Prevent duplicate slug
-    const exists = await Post.findOne({ slug });
-    if (exists) {
-      return res.status(400).json({
-        message: "Post with this title already exists"
-      });
-    }
-
-    const post = await Post.create({
-      title,
-      slug,
-      content,
-      excerpt,
-      status,
-      tags: Array.isArray(tags) ? tags : [], // ✅ safe handling
-      views: 0 // ✅ explicit (optional, default already works)
-    });
-
-    res.status(201).json({
-      message: "Post created successfully",
-      post
-    });
-
-  } catch (err) {
-    console.error("Post create error:", err);
-    res.status(500).json({
-      message: "Failed to create post"
-    });
-  }
-});
-
-
-
-// Update post
-app.put("/api/posts/:id", adminAuth, async (req, res) => {
-  try {
-    const updated = await Post.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true }
-    );
-    res.json(updated);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Delete post
-app.delete("/api/posts/:id", adminAuth, async (req, res) => {
-  try {
-    await Post.findByIdAndDelete(req.params.id);
-    res.json({ message: "Post deleted successfully" });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-
-
-
 
 /* ================================
    SERVER START
 ================================ */
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
+const PORT = parseInt(process.env.PORT) || 5000;
+const server = app.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV || "development"}]`)
 );
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully...");
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      console.log("✅ Server and DB closed.");
+      process.exit(0);
+    });
+  });
+});
