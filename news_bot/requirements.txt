@@ -1,0 +1,10 @@
+# News fetching
+feedparser>=6.0.0
+requests>=2.31.0
+
+# Groq AI (uses OpenAI-compatible API via requests — no extra SDK needed)
+# If you prefer the official SDK: pip install groq
+
+# Google Search Console Indexing API (optional)
+google-auth>=2.0.0
+google-api-python-client>=2.0.0
